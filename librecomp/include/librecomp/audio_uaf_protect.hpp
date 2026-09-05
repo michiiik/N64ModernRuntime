@@ -9,6 +9,7 @@
 #ifndef __LIBRECOMP_AUDIO_UAF_PROTECT__
 #define __LIBRECOMP_AUDIO_UAF_PROTECT__
 
+#include <cstddef>
 #include <cstdint>
 
 // libnaudio voice UAF protection.

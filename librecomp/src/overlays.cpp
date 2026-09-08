@@ -147,6 +147,15 @@ static void frag_reg_record(const uint8_t* rdram, uint32_t id, uint32_t link_bas
     s_frag_reg_count[id]++;
 }
 
+// Only sections that can physically reside in N64 RDRAM are eligible for
+// runtime code registration. ROM-tail/data bins can be emitted as rows in the
+// generated table, but they are not executable overlays; treating one as code
+// lets an arbitrary data DMA claim its enormous address range.
+static constexpr uint32_t kMaxRuntimeCodeSectionSize = 8u * 1024u * 1024u;
+static bool is_runtime_code_section(const SectionTableEntry& section) {
+    return section.size != 0 && section.size <= kMaxRuntimeCodeSectionSize;
+}
+
 static std::unordered_map<int32_t, recomp_func_t*> func_map{};
 // Single-writer / multi-reader lock for func_map. get_function() runs
 // on every recompiled-function indirect call (audio thread, gfx thread,
@@ -1035,6 +1044,7 @@ void recomp::overlays::register_runtime_fragment(uint8_t* rdram, uint32_t id, in
     std::vector<size_t> candidates;
     for (size_t i = 0; i < sections_info.num_code_sections; i++) {
         const SectionTableEntry& sec = sections_info.code_sections[i];
+        if (!is_runtime_code_section(sec)) continue;
         if (is_synthetic_addr(uint32_t(sec.ram_addr))) {
             if (sec.original_pattern_id == id && sec.content_hash != 0) {
                 candidates.push_back(i);
@@ -1389,7 +1399,7 @@ void recomp::overlays::register_runtime_fragment(uint8_t* rdram, uint32_t id, in
                 uint32_t link_vram = j_target - entry_off;
                 for (size_t i = 0; i < sections_info.num_code_sections; i++) {
                     const SectionTableEntry& sec = sections_info.code_sections[i];
-                    if (uint32_t(sec.ram_addr) == link_vram && extent_ok(i)) {
+                    if (is_runtime_code_section(sec) && uint32_t(sec.ram_addr) == link_vram && extent_ok(i)) {
                         found_index = i;
                         fprintf(stderr,
                             "[reg-frag] J-trampoline fallback rescued id=0x%X (signed=%d): "
@@ -1736,6 +1746,13 @@ extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size) {
     // the same base is wasted work; loading at a NEW base is a
     // re-relocation handled by unload+reload.
     auto register_if_new = [&](size_t section_index, int32_t implied_base) {
+        const SectionTableEntry& section = sections_info.code_sections[section_index];
+        if (!is_runtime_code_section(section)) {
+            fprintf(stderr, "[overlay] skipping non-code section index=%zu rom=0x%08X ram=0x%08X size=0x%X\n",
+                    section_index, section.rom_addr, (uint32_t)section.ram_addr, section.size);
+            fflush(stderr);
+            return;
+        }
         evict_overlapping_sections(section_index, implied_base);
 
         auto find_it = std::find_if(loaded_sections.begin(), loaded_sections.end(),

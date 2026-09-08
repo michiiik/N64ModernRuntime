@@ -75,6 +75,21 @@ inline gpr      sx32(uint32_t v) { return (gpr)(int32_t)v; }   // sign-extend 32
 
 bool interpret(uint8_t* rdram, recomp_context* ctx, uint32_t start_pc, int depth);
 
+// Enter a recompiled function from the interpreter using the same native-call
+// boundary as generated code. Generated call sites scope host_return_target
+// to the callee's guest return PC and drain a deferred tailcall before
+// restoring the caller's value.
+inline void call_native(uint8_t* rdram, recomp_context* ctx,
+                        recomp_func_t* func, uint32_t callee_return_target) {
+    const uint32_t prev_host_return = ctx->host_return_target;
+    ctx->host_return_target = callee_return_target;
+    func(rdram, ctx);
+    if (ctx->tailcall_pending) {
+        recomp_handle_tailcalls(rdram, ctx);
+    }
+    ctx->host_return_target = prev_host_return;
+}
+
 // Execute one NON-control instruction (everything except branches/jumps).
 // Returns false (after logging) on an opcode we don't implement yet.
 bool exec_noncontrol(uint8_t* rdram, recomp_context* ctx, gpr* R, fpr* F,
@@ -298,7 +313,7 @@ bool interpret(uint8_t* rdram, recomp_context* ctx, uint32_t start_pc, int depth
             recomp_func_t* nf = recomp_lookup_function_or_null((int32_t)target);
             if (nf != nullptr) {
                 if (recomp_shadow_diff_active()) recomp_shadow_diff_note_native_call();
-                nf(rdram, ctx);                          // call native
+                call_native(rdram, ctx, nf, op == 0x03 ? link : return_target);
                 if (op == 0x03) { pc = link; continue; } // jal: resume after
                 return true;                             // j to native = tail call
             }
@@ -323,7 +338,8 @@ bool interpret(uint8_t* rdram, recomp_context* ctx, uint32_t start_pc, int depth
             recomp_func_t* nf = recomp_lookup_function_or_null((int32_t)target);
             if (nf != nullptr) {
                 if (recomp_shadow_diff_active()) recomp_shadow_diff_note_native_call();
-                nf(rdram, ctx); if (link) { pc = ret; continue; } return true;
+                call_native(rdram, ctx, nf, link ? ret : return_target);
+                if (link) { pc = ret; continue; } return true;
             }
             recomp_capture_interp_target(target);                        // unknown target = dispatch miss; record (discovery)
             if (link) { if (!interpret(rdram, ctx, target, depth + 1)) return false; pc = ret; continue; }

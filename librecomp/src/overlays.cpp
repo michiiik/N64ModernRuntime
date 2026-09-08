@@ -1082,7 +1082,10 @@ void recomp::overlays::register_runtime_fragment(uint8_t* rdram, uint32_t id, in
             // +0x08/+0x0C) is present. Otherwise leave it 0 so extent filtering is a
             // no-op and we never reject a section against a garbage size field.
             if (rd_be32_h(0x08) == 0x46524147u && rd_be32_h(0x0C) == 0x4D454E54u) {
-                frag_size_in_ram = rd_be32_h(0x1C);
+                // The ELF image includes the relocation tail, which may not
+                // remain resident. Candidate matching must allow that image
+                // size, while eviction separately uses the actual RAM size.
+                frag_size_in_ram = std::max(rd_be32_h(0x18), rd_be32_h(0x1C));
             }
         }
     }
@@ -1683,6 +1686,22 @@ void recomp::overlays::read_patch_data(uint8_t* rdram, gpr patch_data_address) {
 }
 
 // Forward declaration — definition is below alongside unload_overlay_by_id.
+extern "C" unsigned char* recomp_runtime_get_rdram(void);
+
+static uint32_t loaded_fragment_extent(int32_t base, uint32_t fallback) {
+    uint8_t* rd = recomp_runtime_get_rdram();
+    const uint32_t paddr = uint32_t(base) & 0x1FFFFFFFu;
+    if (rd == nullptr || paddr > 0x800000u - 0x20u) return fallback;
+    auto word = [&](uint32_t off) {
+        uint32_t value;
+        memcpy(&value, rd + paddr + off, sizeof(value));
+        return value;
+    };
+    if (word(8) != 0x46524147u || word(12) != 0x4D454E54u) return fallback;
+    const uint32_t extent = word(0x1C);
+    return extent != 0 && extent <= 0x800000u - paddr ? extent : fallback;
+}
+
 static void unload_overlay_by_section_index(uint32_t section_table_index);
 
 extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size) {
@@ -1730,7 +1749,8 @@ extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size) {
                 const SectionTableEntry& old_section =
                     sections_info.code_sections[loaded.section_table_index];
                 if (!runtime_ranges_overlap(implied_base, new_section.size,
-                                            loaded.loaded_ram_addr, old_section.size)) {
+                                            loaded.loaded_ram_addr,
+                                            loaded_fragment_extent(loaded.loaded_ram_addr, old_section.size))) {
                     continue;
                 }
 
@@ -1748,9 +1768,8 @@ extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size) {
     auto register_if_new = [&](size_t section_index, int32_t implied_base) {
         const SectionTableEntry& section = sections_info.code_sections[section_index];
         if (!is_runtime_code_section(section)) {
-            fprintf(stderr, "[overlay] skipping non-code section index=%zu rom=0x%08X ram=0x%08X size=0x%X\n",
-                    section_index, section.rom_addr, (uint32_t)section.ram_addr, section.size);
-            fflush(stderr);
+            // This row is encountered on many DMAs; do not flush a diagnostic
+            // for every transfer in normal gameplay.
             return;
         }
         evict_overlapping_sections(section_index, implied_base);
@@ -3873,6 +3892,16 @@ static void unhandled_lookup_trampoline(uint8_t* rdram, recomp_context* ctx) {
                 addr, host, link_target, func_start_link);
         }
         if (found && host != nullptr) {
+            // Cached generated code may predate dispatch-entry switches. An
+            // interior address must never execute the enclosing prologue.
+            if (link_target != func_start_link) {
+                if (recomp_interpret_function(rdram, ctx, addr)) {
+                    note_interp_fallback(addr, INTERP_REASON_FLOOR);
+                    return;
+                }
+                fprintf(stderr, "[recomp] cannot interpret interior entry 0x%08X\n", addr);
+                std::abort();
+            }
             g_tier_self_heals.fetch_add(1, std::memory_order_relaxed);
             // Resume at the interior link vram via the generated dispatch
             // switch; if the miss was actually a function start, enter

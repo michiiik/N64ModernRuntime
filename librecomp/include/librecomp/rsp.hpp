@@ -177,12 +177,20 @@ static inline uint32_t rsp_dma_dram_increment(uint32_t len_reg) {
     dma_dram_address += rsp_dma_dram_increment(_rsp_dma_len_reg); \
 } while (0)
 
+// Match the CPU's mapped offset for uncached KSEG1 task buffers.
+static inline uint32_t rsp_dram_offset(uint32_t dram_addr) {
+    if ((dram_addr & 0xE0000000u) == 0xA0000000u) {
+        return (dram_addr - 0x80000000u) & 0x3FFFFFFFu;
+    }
+    return dram_addr & 0x00FFFFFFu;
+}
+
 static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
     const uint32_t block_len = rsp_dma_block_len(rd_len);
     const uint32_t count = rsp_dma_count(rd_len);
     const uint32_t skip = rsp_dma_skip(rd_len);
     uint32_t cur_dmem = dmem_addr & 0x0FF8u;
-    uint32_t cur_dram = dram_addr & 0xFFFFF8u;
+    uint32_t cur_dram = rsp_dram_offset(dram_addr) & ~7u;
 
     assert(block_len <= 0x1000);
     for (uint32_t block = 0; block <= count; block++) {
@@ -192,9 +200,9 @@ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_
         ::recomp::rsp::trace_dma(false, cur_dmem, cur_dram, block_len);
 
         cur_dmem = (cur_dmem + block_len) & 0x0FFFu;
-        cur_dram = (cur_dram + block_len) & 0xFFFFF8u;
+        cur_dram = (cur_dram + block_len) & 0x3FFFFFF8u;
         if (block != count) {
-            cur_dram = (cur_dram + skip) & 0xFFFFF8u;
+            cur_dram = (cur_dram + skip) & 0x3FFFFFF8u;
         }
     }
 }
@@ -204,7 +212,7 @@ static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_
     const uint32_t count = rsp_dma_count(wr_len);
     const uint32_t skip = rsp_dma_skip(wr_len);
     uint32_t cur_dmem = dmem_addr & 0x0FF8u;
-    uint32_t cur_dram = dram_addr & 0xFFFFF8u;
+    uint32_t cur_dram = rsp_dram_offset(dram_addr) & ~7u;
 
     assert(block_len <= 0x1000);
     for (uint32_t block = 0; block <= count; block++) {
@@ -214,9 +222,9 @@ static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_
         ::recomp::rsp::trace_dma(true, cur_dmem, cur_dram, block_len);
 
         cur_dmem = (cur_dmem + block_len) & 0x0FFFu;
-        cur_dram = (cur_dram + block_len) & 0xFFFFF8u;
+        cur_dram = (cur_dram + block_len) & 0x3FFFFFF8u;
         if (block != count) {
-            cur_dram = (cur_dram + skip) & 0xFFFFF8u;
+            cur_dram = (cur_dram + skip) & 0x3FFFFFF8u;
         }
     }
 }

@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cinttypes>
 #include <string>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -376,6 +377,10 @@ void recomp::rsp::constants_init() {
 
 // Runs a recompiled RSP microcode
 bool recomp::rsp::run_task(uint8_t* rdram, const OSTask* task) {
+    // DMEM is shared by all microcodes. Serialize callers even if tasks
+    // arrive from different host threads.
+    static std::mutex execution_mutex;
+    std::lock_guard execution_lock{execution_mutex};
     assert(rsp_callbacks.get_rsp_microcode != nullptr);
     RspUcodeFunc* ucode_func = rsp_callbacks.get_rsp_microcode(rdram, task);
 
